@@ -32,6 +32,12 @@ CMD_READ        equ     'R'
 CMD_WRITE       equ     'W'
 CMD_RESET       equ     '!'
 
+; Variable definitions
+CBLOCK 0x70
+                TEMP0   ; Temporary variable
+                TEMP1   ; Temporary variable
+ENDC
+
 ;-----------------------------------------------------------------------------
 ; Reset vector instruction will be moved to here by the host utility. This is
 ; how we enter the user application.
@@ -75,19 +81,19 @@ COMMAND_LOOP:
                 movwf   FSR0L
                 movlw   (COMMAND_BYTE >> 8) & 0x00FF
                 movwf   FSR0H
-                movfw   FSR0
+                movfw   INDF0
                 sublw   CMD_QUERY
                 btfsc   STATUS, Z
                 goto    DO_CMD_QUERY
-                movfw   FSR0
+                movfw   INDF0
                 sublw   CMD_READ
                 btfsc   STATUS, Z
                 goto    DO_CMD_READ
-                movfw   FSR0
+                movfw   INDF0
                 sublw   CMD_WRITE
                 btfsc   STATUS, Z
                 goto    DO_CMD_WRITE
-                movfw   FSR0
+                movfw   INDF0
                 sublw   CMD_RESET
                 btfsc   STATUS, Z
                 goto    DO_CMD_RESET
@@ -106,13 +112,77 @@ DO_CMD_RESET:
 ; Serial IO
 ;-----------------------------------------------------------------------------
 
+; Read a character from the serial port.
+;
+; This reads a single character from the serial port. This is a blocking
+; function and will wait for a character to come in before returning.
+;
+; Inputs: None
+; Outputs: W = character read from serial port
+
 READ_CHAR:
+                BANKSEL RCSTA
+                btfss   RCSTA, OERR     ; Check for overrun error
+                goto    WAIT_CHAR
+                bcf     RCSTA, CREN     ; Clear the error
+                bsf     RCSTA, CREN
+WAIT_CHAR:      BANKSEL PIR1
+                btfss   PIR1, RCIF      ; Wait for a character
+                goto    WAIT_CHAR
+                BANKSEL RCREG
+                movfw   RCREG           ; Read the character
                 return
 
+; Write a character to the serial port.
+;
+; This writes a single character on the serial port. This is a blocking
+; function and will wait until the character can be sent.
+;
+; Inputs: W = Character to send
+
 WRITE_CHAR:
+                BANKSEL PIR1
+                btfss   PIR1, RCIF      ; Wait until we can transmit
+                goto    WRITE_CHAR
+                BANKSEL TXREG
+                movwf   TXREG           ; Queue the character
                 return
 
 READ_PKT:
+                ; Set up a pointer to the packet buffer
+                movlw   PACKET_BUFFER & 0x00FF
+                movwf   FSR0L
+                movlw   (PACKET_BUFFER >> 8) & 0x00FF
+                movwf   FSR0H
+READ_CMD:       movlw   1               ; Data for query is 1 extra byte
+                movwf   TEMP0
+                call    READ_CHAR       ; Read the first character
+                movwf   INDF0           ; Save it
+                ; Check for valid command byte
+                sublw   CMD_QUERY
+                btfsc   STATUS, Z
+                goto    READ_DATA
+                movlw   3               ; Size for R is address + term
+                movwf   TEMP0
+                movfw   INDF0
+                sublw   CMD_READ
+                btfsc   STATUS, Z
+                goto    READ_DATA
+                movlw   BLOCK_SIZE + 3  ; Size for W is address + block + term
+                movwf   TEMP0
+                movfw   INDF0
+                sublw   CMD_WRITE
+                btfsc   STATUS, Z
+                goto    READ_DATA
+                movlw   1               ; Size for ! is term
+                movwf   TEMP0
+                movfw   INDF0
+                sublw   CMD_RESET
+                btfsc   STATUS, Z
+                goto    READ_DATA
+                ; TODO: Bad command. Should do something other than ignore
+                goto    READ_CMD
+READ_DATA:
                 return
 
 WRITE_PKT:
@@ -121,23 +191,6 @@ WRITE_PKT:
 ;-----------------------------------------------------------------------------
 ; Helper functions
 ;-----------------------------------------------------------------------------
-
-; Calculate a CCITT-16 CRC value for a block of data
-; See http://www.digitalnemesis.com/info/codesamples/embeddedcrc16/
-;
-; Inputs: FSR0(H/L) points to data to be processed
-;         W contains number of bytes to process
-;
-; Outputs: CRC_HI contains high byte of calculated CRC
-;          CRC_LO contains low byte of calculated CRC
-
-CRC16_TABLE_H   dw      0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70
-                dw      0x81, 0x91, 0xA1, 0xB1, 0xC1, 0xD1, 0xE1, 0xF1
-CRC16_TABLE_L   dw      0x00, 0x21, 0x42, 0x63, 0x84, 0xA5, 0xC6, 0xE7
-                dw      0x08, 0x29, 0x4A, 0x6B, 0x8C, 0xAD, 0xCE, 0xEF
-
-CCITT_CRC:
-                return
 
                 end
 
